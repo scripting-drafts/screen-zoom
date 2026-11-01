@@ -1,0 +1,13 @@
+[Unit]
+Description=Zoom secondary screen (USB-C 150%)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/screen-zoom on
+ExecStop=-%h/bin/screen-zoom off
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical-session.target

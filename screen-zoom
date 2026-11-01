@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Toggle 150% zoom on USB-C-0 (second screen, portable) while leaving
+# HDMI-0 (main display, detected primary) untouched.
+#
+# Zoomed: USB-C-0 1280x800 logical at (1920,280) -> drawn 1.5x by the X server
+#         HDMI-0  1920x1080 at (0,0)             -> top-aligned; visually unchanged
+# Native: USB-C-0 1920x1200 at (1920,0)
+#         HDMI-0  1920x1080 at (0,120)
+#
+# Only works on X11.
+
+set -euo pipefail
+
+ZOOM_OUT=USB-C-0
+MAIN_OUT=HDMI-0
+SCALE=0.6666666666666666
+NOPAN="$HOME/bin/xrandr-nopan"
+FENCE="$HOME/bin/screen-zoom-fence"
+FENCE_PID="${XDG_RUNTIME_DIR:-/tmp}/screen-zoom-fence.pid"
+
+is_on() {
+    xrandr --query | grep "^${ZOOM_OUT} connected" | grep -q ' 1280x800+1920+280 ' &&
+    xrandr --query | grep "^${MAIN_OUT} connected" | grep -q ' 1920x1080+0+0 '
+}
+
+screen_size() {
+    xrandr --query | sed -n '1s/.*current \([0-9]*\) x \([0-9]*\),.*/\1x\2/p'
+}
+
+nopan() {
+    # Clear RandR panning: it lets the pointer drag the whole layout sideways.
+    "$NOPAN" "$ZOOM_OUT" 2>/dev/null || true
+    "$NOPAN" "$MAIN_OUT" 2>/dev/null || true
+}
+
+fence_running() {
+    local pid
+    [ -f "$FENCE_PID" ] || return 1
+    pid=$(cat "$FENCE_PID" 2>/dev/null) || return 1
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+fence_start() {
+    fence_running && return 0
+    nohup python3 "$FENCE" >/dev/null 2>&1 < /dev/null &
+    echo $! > "$FENCE_PID"
+    sleep 0.3
+    fence_running
+}
+
+fence_stop() {
+    local pid
+    if [ -f "$FENCE_PID" ]; then
+        pid=$(cat "$FENCE_PID" 2>/dev/null || true)
+        [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null || true
+        rm -f "$FENCE_PID"
+    fi
+}
+
+zoom_on() {
+    xrandr --output "$MAIN_OUT" --pos 0x0 2>/dev/null || true
+    xrandr --output "$ZOOM_OUT" --scale "${SCALE}x${SCALE}" --pos 1920x280
+    nopan
+    fence_start || true
+}
+
+zoom_off() {
+    fence_stop
+    xrandr --output "$ZOOM_OUT" --scale 1x1 --pos 1920x0 2>/dev/null || true
+    xrandr --output "$MAIN_OUT" --pos 0x120 2>/dev/null || true
+    if [ "$(screen_size)" != "3840x1200" ]; then
+        xrandr --fb 3840x1200 2>/dev/null || true
+    fi
+    nopan
+}
+
+xrandr --query | grep -q "^${ZOOM_OUT} connected" || { echo "$ZOOM_OUT not connected" >&2; exit 1; }
+xrandr --query | grep -q "^${MAIN_OUT} connected" || { echo "$MAIN_OUT not connected" >&2; exit 1; }
+
+case "${1:-toggle}" in
+    on)     if is_on; then nopan; fence_start || true; echo "already zoomed (150%)"; else zoom_on; echo "USB-C-0 zoomed to 150%"; fi ;;
+    off)    if is_on; then zoom_off; echo "USB-C-0 back to 100%"; else fence_stop; echo "already native (100%)"; fi ;;
+    toggle) if is_on; then zoom_off; echo "USB-C-0 back to 100%"; else zoom_on; echo "USB-C-0 zoomed to 150%"; fi ;;
+    status)
+        if is_on; then echo "zoomed (150%)"; else echo "native (100%)"; fi
+        if fence_running; then echo "pointer fence: on"; else echo "pointer fence: off"; fi
+        ;;
+    *)      echo "usage: ${0##*/} [on|off|toggle|status]" >&2; exit 2 ;;
+esac

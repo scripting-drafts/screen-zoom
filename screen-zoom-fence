@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Fence the pointer to the real monitors and undo any layout pan."""
+import ctypes
+import os
+import subprocess
+import time
+
+x = ctypes.CDLL("libX11.so.6")
+xf = ctypes.CDLL("libXfixes.so.3")
+x.XOpenDisplay.restype = ctypes.c_void_p
+x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+x.XDefaultRootWindow.restype = ctypes.c_ulong
+x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+x.XFlush.argtypes = [ctypes.c_void_p]
+x.XQueryPointer.restype = ctypes.c_int
+x.XQueryPointer.argtypes = [
+    ctypes.c_void_p, ctypes.c_ulong,
+    ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_uint),
+]
+x.XWarpPointer.argtypes = [
+    ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+    ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+    ctypes.c_int, ctypes.c_int,
+]
+xf.XFixesCreatePointerBarrier.restype = ctypes.c_ulong
+xf.XFixesCreatePointerBarrier.argtypes = [
+    ctypes.c_void_p, ctypes.c_ulong,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_ulong),
+]
+
+SCRIPT = os.path.expanduser("~/bin/screen-zoom")
+d = x.XOpenDisplay(None)
+root = x.XDefaultRootWindow(d)
+
+
+def pointer_xy():
+    r = ctypes.c_ulong()
+    c = ctypes.c_ulong()
+    px = ctypes.c_int()
+    py = ctypes.c_int()
+    wx = ctypes.c_int()
+    wy = ctypes.c_int()
+    mask = ctypes.c_uint()
+    x.XQueryPointer(d, root, ctypes.byref(r), ctypes.byref(c),
+                    ctypes.byref(px), ctypes.byref(py),
+                    ctypes.byref(wx), ctypes.byref(wy), ctypes.byref(mask))
+    return px.value, py.value
+
+
+def inside(px, py):
+    on_main = 0 <= px < 1920 and 0 <= py < 1080
+    on_second = 1920 <= px < 3200 and 280 <= py < 1080
+    return on_main or on_second
+
+
+def layout_ok():
+    out = subprocess.run(["xrandr", "--query"], capture_output=True, text=True).stdout
+    hdmi = next((l for l in out.splitlines() if l.startswith("HDMI-0 connected")), "")
+    usbc = next((l for l in out.splitlines() if l.startswith("USB-C-0 connected")), "")
+    return "1920x1080+0+0" in hdmi and "1280x800+1920+280" in usbc
+
+
+# If the pointer was left in the framebuffer void, put it back on the main screen.
+px, py = pointer_xy()
+if not inside(px, py):
+    x.XWarpPointer(d, 0, root, 0, 0, 0, 0, 960, 600)
+    x.XFlush(d)
+
+# 150% layout: HDMI 0..1920 x 0..1080, USB-C 1920..3200 x 280..1080
+# directions: 1=block left, 2=block right, 4=block up, 8=block down
+barriers = [
+    (3200, 0, 3200, 1480, 2),
+    (0, 1080, 3200, 1080, 8),
+    (1920, 0, 1920, 280, 2),
+    (1920, 280, 3200, 280, 4),
+]
+for b in barriers:
+    xf.XFixesCreatePointerBarrier(d, root, b[0], b[1], b[2], b[3], b[4], 0, None)
+x.XFlush(d)
+
+bad = 0
+try:
+    while True:
+        time.sleep(0.4)
+        px, py = pointer_xy()
+        if not inside(px, py):
+            x.XWarpPointer(d, 0, root, 0, 0, 0, 0, 960, 600)
+            x.XFlush(d)
+        if layout_ok():
+            bad = 0
+        else:
+            bad += 1
+            if bad >= 2:
+                subprocess.run([SCRIPT, "on"],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+                bad = 0
+except KeyboardInterrupt:
+    pass
